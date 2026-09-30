@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>编辑台 · 网页走词台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-conn="connecting">
+  <header class="topbar">
+    <h1>📝 编辑台</h1>
+    <span class="sub" id="show-name">加载中…</span>
+    <span class="spacer"></span>
+    <span class="badge" id="live-badge">未开演</span>
+    <span class="conn"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">连接中…</span></span>
+  </header>
+
+  <main class="container">
+    <div class="row" style="margin-bottom:14px;">
+      <a class="btn ghost small" href="/">← 场次列表</a>
+      <a class="btn ghost small" href="/operator.html" id="link-operator">操作员台 →</a>
+      <a class="btn ghost small" href="/audience.html" target="_blank" id="link-audience">观众投屏 ↗</a>
+      <span class="spacer"></span>
+      <input type="password" id="editor-token" placeholder="编辑令牌" style="width:220px; margin:0;">
+      <button class="ghost small" id="btn-save-token">记住</button>
+    </div>
+
+    <section class="card">
+      <h2>字幕草稿 <span class="hint">整表保存；每行格式「序号|字幕内容」，空行忽略。发布后草稿可继续改，不影响正在演出的版本</span></h2>
+      <textarea id="draft-area" rows="16" spellcheck="false"
+        placeholder="1|各位观众晚上好&#10;2|欢迎来到今晚的演出&#10;3|……"></textarea>
+      <div class="row end" style="margin-top:12px;">
+        <span class="muted" id="draft-info"></span>
+        <button class="ghost" id="btn-sort">按序号排序</button>
+        <button id="btn-save">保存草稿</button>
+        <button class="ok" id="btn-publish">发布为演出版本</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>已发布版本 <span class="hint">版本一经发布即不可变；演出中不会切换版本</span></h2>
+      <div id="version-list"><p class="muted">加载中…</p></div>
+    </section>
+
+    <section class="card">
+      <h2>当前现场状态 <span class="hint">实时同步，仅作观察，编辑不能操控演出</span></h2>
+      <div id="state-view" class="muted">等待实时状态…</div>
+    </section>
+  </main>
+
+  <script src="/client.js"></script>
+  <script>
+    const { api, store, connect, toast, esc, fmtClock } = Prompter;
+    const showId = Prompter.getShowId();
+    if (!showId) { location.href = '/'; throw new Error('no show'); }
+    document.getElementById('link-operator').href = `/operator.html?show=${showId}`;
+    document.getElementById('link-audience').href = `/audience.html?show=${showId}`;
+    document.getElementById('editor-token').value = store.editorToken;
+
+    let ttlMs = 30000;
+    let lastDraftText = '';
+
+    // ---- 草稿文本与条目互转 --------------------------------------------------
+    function entriesToText(entries) {
+      return entries.map((e) => `${e.seq}|${e.text}`).join('\n');
+    }
+    function parseDraftText(text) {
+      const lines = text.split(/\r?\n/);
+      const rows = [];
+      const seen = new Set();
+      lines.forEach((line, i) => {
+        const t = line.trim();
+        if (!t) return;
+        const bar = t.indexOf('|');
+        if (bar === -1) {
+          throw new Error(`第 ${i + 1} 行缺少分隔符「|」，应为：序号|字幕内容`);
+        }
+        const seq = parseInt(t.slice(0, bar).trim(), 10);
+        const content = t.slice(bar + 1).trim();
+        if (!Number.isInteger(seq) || seq < 1) {
+          throw new Error(`第 ${i + 1} 行序号无效：${esc(t.slice(0, bar))}`);
+        }
+        if (seen.has(seq)) throw new Error(`序号重复：${seq}（请检查第 ${i + 1} 行）`);
+        seen.add(seq);
+        if (!content) throw new Error(`序号 ${seq} 的字幕内容为空`);
+        rows.push({ seq, text: content });
+      });
+      if (rows.length === 0) throw new Error('草稿为空：至少需要一条非空字幕');
+      return rows;
+    }
+
+    async function loadShow() {
+      const data = await api(`/api/shows/${showId}`);
+      document.getElementById('show-name').textContent =
+        `${data.show.name} #${data.show.id} · 创建于 ${fmtClock(data.show.createdAt)}`;
+      ttlMs = data.controlTtlMs;
+      const text = entriesToText(data.draft.entries);
+      const area = document.getElementById('draft-area');
+      // 不覆盖用户正在编辑但尚未保存的内容（首次加载或无改动时填充）
+      if (!area.value || area.value === lastDraftText || !lastDraftText) {
+        area.value = text;
+        lastDraftText = text;
+      }
+      renderVersions(data.versions);
+      renderState(data.state);
+    }
+
+    function renderVersions(versions) {
+      const el = document.getElementById('version-list');
+      if (!versions.length) {
+        el.innerHTML = '<p class="muted">尚无已发布版本。保存草稿后点击「发布为演出版本」。</p>';
+        return;
+      }
+      el.innerHTML = `
+        <table>
+          <thead><tr><th>版本</th><th>条目数</th><th>发布时间</th><th>状态</th></tr></thead>
+          <tbody>
+            ${versions.map((v) => `
+              <tr>
+                <td class="num">v${v.version}</td>
+                <td>${v.count} 条</td>
+                <td class="muted">${fmtClock(v.publishedAt)}</td>
+                <td id="ver-state-${v.id}"></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function renderState(state) {
+      const badge = document.getElementById('live-badge');
+      if (state.isLive) {
+        badge.className = 'badge live';
+        badge.textContent = `● 演出中 · v${state.activeVersionNo}`;
+      } else {
+        badge.className = 'badge';
+        badge.textContent = '未开演';
+      }
+      const ctl = state.control && !state.control.expired
+        ? `控制权：${esc(state.control.holderName)}（至 ${fmtClock(state.control.expiresAt)}）`
+        : '控制权：空闲';
+      document.getElementById('state-view').innerHTML = `
+        <div class="row" style="gap:18px;">
+          <span>状态版本号 <b class="mono">r${state.revision}</b></span>
+          <span>${state.isLive ? `演出版本 v${state.activeVersionNo}` : '未开演'}</span>
+          <span>游标 seq=${state.cursor}（第 ${state.position.index}/${state.position.total} 条）</span>
+          <span>${ctl}</span>
+        </div>
+        <div style="margin-top:10px;">当前屏显：${state.currentText ? esc(state.currentText) : '<span class="muted">（空屏）</span>'}</div>`;
+      // 标注哪个版本正在演出
+      document.querySelectorAll('[id^="ver-state-"]').forEach((td) => {
+        const id = Number(td.id.split('-').pop());
+        td.innerHTML = id === state.activeVersionId && state.isLive
+          ? '<span class="badge live">正在演出</span>'
+          : '<span class="muted">—</span>';
+      });
+    }
+
+    // ---- 操作 ---------------------------------------------------------------
+    document.getElementById('btn-save-token').onclick = () => {
+      store.editorToken = document.getElementById('editor-token').value.trim();
+      toast('编辑令牌已记住', 'ok');
+    };
+
+    document.getElementById('btn-sort').onclick = () => {
+      try {
+        const rows = parseDraftText(document.getElementById('draft-area').value);
+        rows.sort((a, b) => a.seq - b.seq);
+        document.getElementById('draft-area').value = entriesToText(rows);
+        toast('已按序号排序', 'ok');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    };
+
+    document.getElementById('btn-save').onclick = async () => {
+      let rows;
+      try {
+        rows = parseDraftText(document.getElementById('draft-area').value);
+      } catch (e) {
+        return toast(e.message, 'error');
+      }
+      try {
+        await api(`/api/shows/${showId}/draft`, { method: 'PUT', body: { entries: rows }, auth: true });
+        lastDraftText = document.getElementById('draft-area').value;
+        document.getElementById('draft-info').textContent = `已保存 ${rows.length} 条 · ${new Date().toLocaleTimeString()}`;
+        toast(`草稿已保存（${rows.length} 条）`, 'ok');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    };
+
+    document.getElementById('btn-publish').onclick = async () => {
+      // 先持久化草稿再发布；演出中也允许发布新版本，但不会影响当前演出
+      let rows;
+      try {
+        rows = parseDraftText(document.getElementById('draft-area').value);
+      } catch (e) {
+        return toast(e.message, 'error');
+      }
+      try {
+        await api(`/api/shows/${showId}/draft`, { method: 'PUT', body: { entries: rows }, auth: true });
+      } catch (e) {
+        return toast(`草稿保存失败：${e.message}`, 'error');
+      }
+      try {
+        const { version } = await api(`/api/shows/${showId}/publish`, { method: 'POST', body: {}, auth: true });
+        lastDraftText = document.getElementById('draft-area').value;
+        toast(`已发布演出版本 v${version.version}（${version.count} 条）`, 'ok');
+        const { versions, state } = await api(`/api/shows/${showId}`);
+        renderVersions(versions);
+        renderState(state);
+      } catch (e) {
+        toast(`发布被拒绝：${e.message}`, 'error');
+      }
+    };
+
+    // 实时通道：仅用于观察现场状态
+    connect(showId, {
+      onState: renderState,
+      onControl: (reason) => {
+        const map = {
+          acquired: '有操作员取得了控制权',
+          takenover: '控制权已被他人接管',
+          renewed: '控制权已续期',
+          released: '操作员已释放控制权',
+          expired: '控制权已过期，可被接管',
+        };
+        toast(map[reason] || reason);
+      },
+    });
+
+    loadShow().catch((e) => toast(`加载失败：${e.message}`, 'error'));
+    setInterval(() => loadShow().catch(() => {}), 15000);
+  </script>
+</body>
+</html>

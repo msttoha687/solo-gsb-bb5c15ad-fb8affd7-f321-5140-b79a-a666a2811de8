@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>观众投屏 · 网页走词台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-conn="connecting" style="background:#000;">
+  <div id="stage" class="fullscreen-cue">
+    <div class="bar">
+      <span id="bar-info">连接中…</span>
+      <span class="conn"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">连接中…</span></span>
+    </div>
+    <div class="text blank" id="cue">— 等待演出开始 —</div>
+  </div>
+
+  <script src="/client.js"></script>
+  <script>
+    const { api, connect, esc } = Prompter;
+    const showId = Prompter.getShowId();
+    if (!showId) { location.href = '/'; throw new Error('no show'); }
+
+    let lastRevision = -1;
+
+    function render(s) {
+      const cue = document.getElementById('cue');
+      if (s.isLive && s.currentText) {
+        cue.textContent = s.currentText;
+        cue.classList.remove('blank');
+      } else {
+        cue.textContent = s.isLive ? '— 空屏 —' : '— 等待演出开始 —';
+        cue.classList.add('blank');
+      }
+      document.getElementById('bar-info').textContent = s.isLive
+        ? `演出版本 v${s.activeVersionNo} · 第 ${s.position.index}/${s.position.total} 条 · r${s.revision}`
+        : `未开演 · r${s.revision}`;
+
+      // 仅在确认的新版本时闪一下，避免重连首帧造成误闪
+      if (lastRevision !== -1 && s.revision > lastRevision && s.cursor !== 0) {
+        cue.animate(
+          [{ opacity: 0.25 }, { opacity: 1 }],
+          { duration: 250, easing: 'ease-out' }
+        );
+      }
+      lastRevision = s.revision;
+    }
+
+    connect(showId, {
+      onState: render,
+      // 观众侧只展示与字幕相关的控制变化
+      onControl: (reason, s) => render(s),
+    });
+
+    // 兜底：即使实时通道异常，HTTP 轮询也会恢复到最新已确认状态
+    setInterval(async () => {
+      try {
+        const { state } = await api(`/api/shows/${showId}`);
+        render(state);
+      } catch {
+        /* 实时连接会自行重连 */
+      }
+    }, 8000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>网页走词台 · 场次列表</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-conn="connecting">
+  <header class="topbar">
+    <h1>🎭 网页走词台</h1>
+    <span class="sub">小剧场有序字幕 · 版本发布 · 限时控台</span>
+    <span class="spacer"></span>
+    <span class="conn"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">连接中…</span></span>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>新建场次 <span class="hint">编辑者可创建并录入字幕；如服务器配置了编辑令牌，需先在下方填写</span></h2>
+      <div class="row">
+        <input type="text" id="new-name" placeholder="场次名称，例如：9月30日晚场《夜航》" style="flex:1; margin:0;">
+        <button id="btn-create">创建场次</button>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <input type="password" id="editor-token" placeholder="编辑令牌（未配置 EDITOR_TOKEN 时留空）" style="flex:1; margin:0;">
+        <button class="ghost small" id="btn-save-token">记住令牌</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>全部场次</h2>
+      <div id="show-list" class="show-list"><p class="muted">加载中…</p></div>
+    </section>
+  </main>
+
+  <script src="/client.js"></script>
+  <script>
+    const { api, store, toast, esc, fmtClock } = Prompter;
+
+    // 本页的连接状态仅用于指示服务可达性（订阅 1 号房间不存在时会失败，改用健康检查）
+    async function pingLoop() {
+      const dot = document.getElementById('conn-dot');
+      const txt = document.getElementById('conn-text');
+      async function ping() {
+        try {
+          await api('/api/health');
+          document.body.dataset.conn = 'live';
+          dot.className = 'conn-dot live';
+          txt.textContent = '服务在线';
+        } catch {
+          document.body.dataset.conn = 'down';
+          dot.className = 'conn-dot down';
+          txt.textContent = '无法连接服务';
+        }
+      }
+      ping();
+      setInterval(ping, 4000);
+    }
+
+    async function loadShows() {
+      const wrap = document.getElementById('show-list');
+      try {
+        const { shows } = await api('/api/shows');
+        if (shows.length === 0) {
+          wrap.innerHTML = '<p class="muted">还没有场次，先在上方创建一个吧。</p>';
+          return;
+        }
+        wrap.innerHTML = shows.map((s) => `
+          <div class="show-item">
+            <a href="/editor.html?show=${s.id}" class="name">${esc(s.name)} <span class="muted" style="font-size:12px;">#${s.id}</span></a>
+            <div class="tags">
+              ${s.isLive ? '<span class="badge live">● 演出中</span>' : '<span class="badge">未开演</span>}
+              <span class="badge">已发布 v${s.publishedVersion || 0}</span>
+              <span class="badge">现场 r${s.revision}</span>
+            </div>
+            <div class="muted" style="margin-top:10px; display:flex; gap:14px;">
+              <a href="/editor.html?show=${s.id}">编辑台</a>
+              <a href="/operator.html?show=${s.id}">操作员</a>
+              <a href="/audience.html?show=${s.id}" target="_blank">观众投屏</a>
+            </div>
+          </div>`).join('');
+      } catch (e) {
+        wrap.innerHTML = `<p class="muted">加载失败：${esc(e.message)}</p>`;
+      }
+    }
+
+    document.getElementById('btn-save-token').onclick = () => {
+      store.editorToken = document.getElementById('editor-token').value.trim();
+      toast('编辑令牌已保存在本浏览器', 'ok');
+    };
+    document.getElementById('editor-token').value = store.editorToken;
+
+    document.getElementById('btn-create').onclick = async () => {
+      const name = document.getElementById('new-name').value.trim();
+      if (!name) return toast('请填写场次名称', 'error');
+      try {
+        const { show } = await api('/api/shows', { method: 'POST', body: { name }, auth: true });
+        toast(`场次「${show.name}」已创建`, 'ok');
+        location.href = `/editor.html?show=${show.id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    };
+
+    pingLoop();
+    loadShows();
+    setInterval(loadShows, 5000);
+  </script>
+</body>
+</html>

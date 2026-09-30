@@ -1,0 +1,27 @@
+# 一键启动：docker compose up -d --build
+services:
+  prompter:
+    build: .
+    image: stage-prompter:latest
+    container_name: stage-prompter
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      # 控制权有效时长（毫秒），默认 30 秒，过期后他人可接管
+      CONTROL_TTL_MS: "${CONTROL_TTL_MS:-30000}"
+      # 可选：设置后，创建场次/保存草稿/发布需要编辑令牌
+      # 留空表示不启用编辑鉴权（适用于可信内网）
+      EDITOR_TOKEN: "${EDITOR_TOKEN:-}"
+      DB_PATH: /data/prompter.db
+    volumes:
+      - prompter-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  prompter-data:

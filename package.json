@@ -1,0 +1,17 @@
+{
+  "name": "stage-prompter",
+  "version": "1.0.0",
+  "description": "小剧场网页走词台：有序字幕编辑、版本发布、限时控台与实时投屏",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "ws": "^8.18.0"
+  }
+}
