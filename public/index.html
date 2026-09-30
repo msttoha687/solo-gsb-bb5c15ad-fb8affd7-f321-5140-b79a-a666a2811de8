@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>小剧场走词台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="topbar">
+    <h1>🎭 小剧场走词台</h1>
+  </div>
+  <div style="max-width: 1000px; margin: 0 auto; padding: 0 20px;">
+    <p class="muted" style="margin-top:18px; font-size:14px;">
+      编辑器录入并发布演出版本；操作员在限时独占控制权下推进、回退、清屏；观众页实时显示当前字幕。
+      所有状态保存在服务器 SQLite 中，断线重连或服务重启后自动恢复最新已确认状态。
+    </p>
+    <div class="home-grid">
+      <a class="home-card" href="/editor.html">
+        <div class="big">📝 编辑器</div>
+        <p>录入有序字幕、保存草稿、发布固化演出版本，创建并管理演出场次。</p>
+      </a>
+      <a class="home-card" href="/operator.html">
+        <div class="big">🎛️ 操作员台</div>
+        <p>取得限时控制权后开始演出、推进 / 回退 / 清屏；过期后他人可接管。</p>
+      </a>
+      <a class="home-card" href="/audience.html">
+        <div class="big">🖥️ 观众屏</div>
+        <p>全屏实时显示当前字幕，断线自动重连，重连后恢复最新确认画面。</p>
+      </a>
+    </div>
+    <p class="muted" style="margin-top:24px;">
+      提示：观众页可直接打开 <a href="/audience.html">/audience.html</a>（自动选择最新场次），
+      也可用 <code>/audience.html?session=场次ID</code> 指定场次。
+    </p>
+  </div>
+</body>
+</html>

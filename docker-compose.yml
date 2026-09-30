@@ -1,0 +1,25 @@
+services:
+  teleprompter:
+    build: .
+    image: theater-teleprompter:latest
+    container_name: theater-teleprompter
+    restart: unless-stopped
+    ports:
+      # 宿主机端口:容器端口 —— 修改左侧即可换访问端口
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      # 控制权有效期（秒）：到期后他人可接管
+      CONTROL_TTL_SECONDS: "${CONTROL_TTL_SECONDS:-60}"
+      # 失效控制权扫描间隔（秒）
+      SWEEP_INTERVAL_SECONDS: "${SWEEP_INTERVAL_SECONDS:-1}"
+    volumes:
+      # SQLite 数据持久化到宿主机，容器重建/重启后状态完整恢复
+      - teleprompter-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  teleprompter-data:

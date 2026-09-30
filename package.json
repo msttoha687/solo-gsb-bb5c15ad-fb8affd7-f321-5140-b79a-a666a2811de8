@@ -1,0 +1,19 @@
+{
+  "name": "theater-teleprompter",
+  "version": "1.0.0",
+  "description": "小剧场网页走词台：编辑发布演出版本、操作员限时限控、观众实时看词，Node.js + SQLite + WebSocket，无外部服务",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "smoke": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}

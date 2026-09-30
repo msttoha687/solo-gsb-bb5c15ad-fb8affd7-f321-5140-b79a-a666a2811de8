@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>观众屏 · 小剧场走词台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="audience">
+  <div id="conn-status" class="conn" style="background:rgba(20,23,29,0.55);"></div>
+
+  <div class="audience-stage">
+    <div id="cue" class="audience-cue cleared"></div>
+  </div>
+  <div id="meta" class="audience-meta"></div>
+
+  <script src="/app.js"></script>
+  <script>
+  (() => {
+    const { RpcSocket, mountStatus } = window.TP;
+    const socket = new RpcSocket();
+    mountStatus(socket);
+
+    const cue = document.getElementById('cue');
+    const meta = document.getElementById('meta');
+    const params = new URLSearchParams(location.search);
+    let sessionId = Number(params.get('session')) || null;
+    let renderedKey = '';
+
+    function render(snap) {
+      if (!snap) return;
+      const parts = [];
+      parts.push(snap.name);
+      if (snap.version) parts.push(`v${snap.version.version}`);
+      meta.textContent = `${parts.join(' · ')} · 状态 #${snap.stateVersion}`;
+
+      let key;
+      if (snap.status === 'closed') {
+        cue.textContent = '';
+        cue.classList.add('cleared');
+        key = 'closed';
+      } else if (snap.showing && snap.current) {
+        cue.textContent = snap.current.text;
+        cue.classList.remove('cleared');
+        key = `${snap.currentIndex}:${snap.current.seq}`;
+      } else {
+        // 清屏/片头：纯黑无文字
+        cue.textContent = '';
+        cue.classList.add('cleared');
+        key = `clear:${snap.currentIndex}:${snap.stateVersion}`;
+      }
+
+      // 相同画面不做闪动；断线重连后若画面一致也不会跳变
+      if (key !== renderedKey) {
+        renderedKey = key;
+        if (!cue.classList.contains('cleared')) {
+          cue.style.opacity = '0';
+          requestAnimationFrame(() => {
+            cue.style.opacity = '1';
+          });
+        }
+      }
+    }
+
+    socket.events.addEventListener('subscribed', (e) => {
+      if (e.detail.snapshot) render(e.detail.snapshot);
+    });
+    socket.events.addEventListener('snapshot', (e) => {
+      if (e.detail.sessionId === sessionId) render(e.detail.snapshot);
+    });
+
+    socket.events.addEventListener('status', (e) => {
+      // 重连后 RpcSocket 会自动重建订阅，subscribed 消息带回最新已确认状态
+      //（即使服务刚重启，也从 SQLite 恢复）
+      if (e.detail.connected && !sessionId) resolveAndSubscribe();
+    });
+
+    async function resolveAndSubscribe() {
+      if (!sessionId) {
+        try {
+          const res = await fetch('/api/latest');
+          const data = await res.json();
+          sessionId = data.sessionId;
+        } catch {
+          sessionId = null;
+        }
+      }
+      if (sessionId) {
+        // 首屏先用 REST 立即恢复，再挂 WS 接收实时更新
+        try {
+          const res = await fetch(`/api/sessions/${sessionId}`);
+          if (res.ok) render((await res.json()).snapshot);
+        } catch { /* WS 订阅会再次拉取 */ }
+        socket.subscribe('session', { sessionId });
+      } else {
+        cue.textContent = '尚无演出场次';
+        cue.classList.remove('cleared');
+        cue.style.opacity = '0.5';
+        // 等待编辑器创建场次后自动跟随最新场次
+        setTimeout(resolveAndSubscribe, 3000);
+      }
+    }
+
+    resolveAndSubscribe();
+  })();
+  </script>
+</body>
+</html>

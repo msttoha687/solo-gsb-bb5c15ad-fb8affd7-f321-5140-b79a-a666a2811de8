@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>操作员台 · 小剧场走词台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="conn-status" class="conn"></div>
+  <div class="topbar">
+    <h1>🎛️ 操作员台</h1>
+    <nav>
+      <a href="/">首页</a>
+      <a href="/editor.html">编辑器</a>
+      <a href="/operator.html" class="active">操作员台</a>
+      <a href="/audience.html">观众屏</a>
+    </nav>
+  </div>
+
+  <div class="layout">
+    <div>
+      <div class="panel">
+        <h2>
+          <span>场次选择</span>
+        </h2>
+        <div class="row">
+          <select id="session-select" style="flex:1;"></select>
+          <a id="audience-link" class="badge" target="_blank" href="#">观众屏 ↗</a>
+        </div>
+        <div class="row" style="margin-top:12px;">
+          <span id="status-badge" class="badge ready">待开演</span>
+          <span id="version-badge" class="muted"></span>
+          <span id="sv-badge" class="muted"></span>
+        </div>
+      </div>
+
+      <div class="stage-card">
+        <div id="cue" class="cue" style="color:#2a313c;">— 准备就绪 —</div>
+        <div id="cue-sub" class="sub"></div>
+      </div>
+
+      <div class="controls">
+        <button id="btn-back">◀ 回退</button>
+        <button id="btn-advance" class="primary">推进 ▶</button>
+        <button id="btn-clear">清屏</button>
+        <button id="btn-start" class="ok">● 开始演出</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="btn-close" class="small danger">结束并关闭场次</button>
+        <span class="muted">每个操作都基于你页面上显示的状态版本；按钮旁提示当前版本号。</span>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>控制权</h2>
+        <label>操作员名称（同一浏览器会记住你的令牌以便断线重连）</label>
+        <input type="text" id="op-name" maxlength="40" placeholder="操作员姓名 / 岗位" />
+        <div class="row" style="margin-top:10px;">
+          <button id="btn-acquire" class="primary">取得控制权</button>
+          <button id="btn-release">主动交出</button>
+          <span id="ttl" class="badge">未持控</span>
+        </div>
+        <p class="muted" style="margin:10px 0 0;">
+          控制权有时限并需定时心跳维持；同一场次同时仅一人持控，过期后他人可接管。
+          断线重连后，如令牌仍有效会自动恢复。
+        </p>
+      </div>
+
+      <div class="panel">
+        <h2>演出版本</h2>
+        <p id="locked-note" class="muted"></p>
+        <div id="entry-list" class="pill-list" style="max-height:320px; overflow:auto;"></div>
+      </div>
+
+      <div class="panel">
+        <h2>操作日志</h2>
+        <div id="op-log" style="max-height:220px; overflow:auto; font-size:12px; display:flex; flex-direction:column; gap:4px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <script src="/app.js"></script>
+  <script>
+  (() => {
+    const { $, h, uid, RpcSocket, mountStatus, toast } = window.TP;
+    const socket = new RpcSocket();
+    mountStatus(socket);
+
+    let sessionId = null;
+    let snap = null;
+    let token = null;
+    let ttlDeadline = 0;
+    let controlTtlSeconds = 60;
+    let heartbeatTimer = null;
+    let ttlTicker = null;
+    const pendingOps = new Map(); // opId -> {method, label}
+
+    const tokenKey = (id) => `tp_token_${id}`;
+
+    // ---------- 状态渲染 ----------
+    function renderStatus() {
+      if (!snap) return;
+      const map = { ready: ['待开演', 'ready'], live: ['演出中', 'live'], closed: ['已结束', 'closed'] };
+      const [t, cls] = map[snap.status] || [snap.status, ''];
+      const badge = $('#status-badge');
+      badge.textContent = t;
+      badge.className = `badge ${cls}`;
+      $('#version-badge').textContent = snap.version
+        ? `版本 v${snap.version.version}${snap.version.label ? ' · ' + snap.version.label : ''} · 共 ${snap.version.total} 条`
+        : '未绑定版本';
+      $('#sv-badge').textContent = `页面状态版本 #${snap.stateVersion}`;
+
+      const cue = $('#cue');
+      const sub = $('#cue-sub');
+      if (snap.status === 'closed') {
+        cue.textContent = '演出已结束';
+        cue.style.color = '#8b95a5';
+        sub.textContent = '本场次已关闭，不能再操作';
+      } else if (snap.current && snap.showing) {
+        cue.textContent = snap.current.text;
+        cue.style.color = '#fdfdfd';
+        sub.textContent = `序号 ${snap.current.seq} · 第 ${snap.currentIndex}/${snap.version ? snap.version.total : '-' } 条`;
+      } else {
+        cue.textContent = snap.status === 'ready' ? '— 准备就绪，待开始演出 —' : '— 屏幕已清 —';
+        cue.style.color = '#2a313c';
+        sub.textContent = snap.status === 'live' ? `下一条：${previewNext()}` : '';
+      }
+
+      renderEntries();
+      renderButtons();
+      updateControlPanel();
+    }
+
+    function previewNext() {
+      if (!snap || !snap.entries) return '';
+      const i = snap.showing ? snap.currentIndex : snap.currentIndex - 1;
+      const e = snap.entries[i];
+      return e ? `第 ${e.seq} 条` : '—';
+    }
+
+    function renderEntries() {
+      const box = $('#entry-list');
+      box.innerHTML = '';
+      if (!snap) return;
+      $('#locked-note').textContent =
+        snap.status === 'live'
+          ? '演出进行中，版本已锁定：切换版本会被拒绝；如需改用新版本请另开场次。'
+          : '场次开始前可在编辑器调整场次所使用的已发布版本。';
+      (snap.entries || []).forEach((e, i) => {
+        const isCurrent = snap.showing && i + 1 === snap.currentIndex;
+        box.append(h('div', { class: `pill${isCurrent ? ' current' : ''}` }, [
+          h('span', { class: 'seq' }, String(e.seq)),
+          h('span', { class: 'text' }, e.text),
+        ]));
+      });
+      const cur = box.querySelector('.pill.current');
+      if (cur) cur.scrollIntoView({ block: 'nearest' });
+    }
+
+    function renderButtons() {
+      const closed = snap.status === 'closed';
+      const ready = snap.status === 'ready';
+      const mine = snap.control.heldByMe;
+      const live = snap.status === 'live';
+      $('#btn-start').disabled = closed || live || !mine;
+      $('#btn-advance').disabled = closed || ready || !mine;
+      $('#btn-back').disabled = closed || ready || !mine;
+      $('#btn-clear').disabled = closed || ready || !mine || !snap.showing;
+      $('#btn-close').disabled = closed || !mine;
+      $('#btn-release').disabled = !mine;
+      $('#btn-acquire').disabled = closed;
+    }
+
+    function updateControlPanel() {
+      const c = snap.control;
+      const ttl = $('#ttl');
+      if (c.heldByMe) {
+        ttl.className = 'badge live';
+      } else if (c.active) {
+        ttl.className = 'badge warn';
+      } else {
+        ttl.className = 'badge';
+      }
+      const remain = c.active ? Math.max(0, Math.ceil((c.expiresAt - Date.now()) / 1000)) : 0;
+      ttl.textContent = c.heldByMe
+        ? `你持控中 · ${remain}s`
+        : c.active
+          ? `「${c.holderName}」持控中 · ${remain}s`
+          : '无人持控';
+    }
+
+    function log(line, kind = '') {
+      const box = $('#op-log');
+      const colorMap = { ok: '#7fd2a0', err: '#ef9a9d', warn: '#f2c796', info: '#9aa5b5' };
+      box.prepend(h('div', { style: `color:${colorMap[kind] || colorMap.info}` },
+        `${new Date().toLocaleTimeString()}　${line}`));
+      while (box.children.length > 60) box.lastChild.remove();
+    }
+
+    // ---------- 操作：每次生成唯一 opId，带页面当前 stateVersion ----------
+    async function stage(method, label) {
+      if (!snap) return;
+      if (!snap.control.heldByMe) return toast('你未持有控制权，请先取得控制权', 'warn');
+      const opId = uid('stage');
+      pendingOps.set(opId, { method, label });
+      log(`提交：${label}（基于状态 #${snap.stateVersion}，op=${opId.slice(-6)}）`, 'info');
+      try {
+        const r = await socket.call(method, {
+          sessionId,
+          token,
+          opId,
+          baseVersion: snap.stateVersion,
+        });
+        if (r.duplicate) {
+          toast(`重复提交：${r.reason}`, 'warn', 4000);
+          log(`重复提交被拦截：${r.reason}`, 'warn');
+        } else {
+          toast(`${label}已生效（状态 #${r.stateVersion}）`, 'ok', 1500);
+          log(`${label}生效 → 状态 #${r.stateVersion}`, 'ok');
+        }
+      } catch (err) {
+        // 失效控制权 / 旧版本 / 重复 / 边界 —— 必须把原因展示给操作员
+        const svNote = err.stateVersion != null ? `（当前状态 #${err.stateVersion}）` : '';
+        toast(`${label}被拒绝：${err.message}${svNote}`, 'error', 5000);
+        log(`${label}被拒绝 [${err.code}]：${err.message}${svNote}`, 'err');
+        if (err.code === 'NOT_CONTROLLER') {
+          token = null;
+          localStorage.removeItem(tokenKey(sessionId));
+          stopHeartbeat();
+        }
+      } finally {
+        pendingOps.delete(opId);
+      }
+    }
+
+    $('#btn-advance').addEventListener('click', () => stage('advance', '推进'));
+    $('#btn-back').addEventListener('click', () => stage('back', '回退'));
+    $('#btn-clear').addEventListener('click', () => stage('clear', '清屏'));
+    $('#btn-start').addEventListener('click', () => stage('start', '开始演出'));
+    $('#btn-close').addEventListener('click', async () => {
+      if (!window.confirm('确定结束并关闭本场次？关闭后不能再操作。')) return;
+      try {
+        await socket.call('closeSession', { sessionId, token });
+        log('场次已结束并关闭', 'warn');
+      } catch (err) {
+        toast(`关闭被拒绝：${err.message}`, 'error');
+      }
+    });
+
+    // ---------- 控制权 ----------
+    function startHeartbeat() {
+      stopHeartbeat();
+      // 心跳间隔取 TTL 的 1/3，留出网络抖动余量
+      const intervalMs = Math.max(5000, Math.floor((controlTtlSeconds * 1000) / 3));
+      heartbeatTimer = setInterval(async () => {
+        if (!token) return;
+        try {
+          const r = await socket.call('heartbeat', { sessionId, token, opId: uid('hb') });
+          if (r.expiresAt) ttlDeadline = r.expiresAt;
+        } catch (err) {
+          log(`心跳失败：${err.message}`, 'err');
+          token = null;
+          localStorage.removeItem(tokenKey(sessionId));
+          stopHeartbeat();
+        }
+      }, intervalMs);
+      ttlTicker = setInterval(updateControlPanel, 500);
+    }
+    function stopHeartbeat() {
+      clearInterval(heartbeatTimer);
+      clearInterval(ttlTicker);
+      heartbeatTimer = ttlTicker = null;
+    }
+
+    async function acquire(silent = false) {
+      const name = $('#op-name').value.trim() || '操作员';
+      try {
+        const r = await socket.call('acquireControl', { sessionId, name, token: token || undefined });
+        token = r.token;
+        controlTtlSeconds = r.ttlSeconds || controlTtlSeconds;
+        ttlDeadline = Date.now() + controlTtlSeconds * 1000;
+        localStorage.setItem(tokenKey(sessionId), token);
+        socket.call('setToken', { token }).catch(() => {});
+        startHeartbeat();
+        if (!silent) toast(r.takenOver ? '已接管过期控制权' : '控制权取得成功', 'ok');
+        log(`取得控制权（有效期 ${r.ttlSeconds}s）${r.takenOver ? '，接管了过期持控者' : ''}`, 'ok');
+      } catch (err) {
+        if (err.code === 'CONTROL_HELD') toast(err.message, 'warn', 5000);
+        else toast(`取得控制权失败：${err.message}`, 'error');
+        log(`取得控制权失败 [${err.code}]：${err.message}`, 'err');
+      }
+    }
+
+    $('#btn-acquire').addEventListener('click', () => acquire(false));
+    $('#btn-release').addEventListener('click', async () => {
+      try {
+        await socket.call('releaseControl', { sessionId, token });
+        log('已主动交出控制权', 'warn');
+      } catch (err) {
+        toast(err.message, 'error');
+      } finally {
+        token = null;
+        localStorage.removeItem(tokenKey(sessionId));
+        stopHeartbeat();
+      }
+    });
+
+    // ---------- 快照推送（含断线重连后的恢复） ----------
+    socket.events.addEventListener('subscribed', (e) => {
+      if (e.detail.snapshot) {
+        snap = e.detail.snapshot;
+        renderStatus();
+      }
+    });
+    socket.events.addEventListener('snapshot', (e) => {
+      if (e.detail.sessionId !== sessionId) return;
+      snap = e.detail.snapshot;
+      // 若自己的令牌已不再匹配（过期/被接管/服务重启后失效），本地令牌作废并给出原因
+      if (token && !snap.control.heldByMe) {
+        if (snap.control.active) {
+          toast(`控制权已被他人接管（你的持控已过期）：当前持控者「${snap.control.holderName}」`, 'warn', 5000);
+          log('控制权过期后被他人接管，本地令牌失效', 'warn');
+        } else {
+          log('控制权已失效（当前无人持控，可重新取得）', 'warn');
+        }
+        token = null;
+        localStorage.removeItem(tokenKey(sessionId));
+        stopHeartbeat();
+      }
+      renderStatus();
+    });
+
+    socket.events.addEventListener('status', (e) => {
+      if (e.detail.connected && token) {
+        // 重连后把令牌重新绑定到新连接，并尝试续期（未过期则恢复持控）
+        socket.call('setToken', { token }).then(() => acquire(true)).catch(() => {});
+      }
+    });
+
+    // ---------- 场次选择 ----------
+    async function loadSessionList() {
+      const res = await fetch('/api/scripts');
+      const scripts = (await res.json()).scripts || [];
+      const all = [];
+      for (const s of scripts) {
+        const r = await fetch(`/api/scripts/${s.id}`);
+        const d = await r.json();
+        for (const ses of d.sessions) all.push({ ...ses, scriptTitle: s.title });
+      }
+      const sel = $('#session-select');
+      sel.innerHTML = '';
+      if (!all.length) {
+        sel.append(h('option', { value: '' }, '尚无场次，请先到编辑器创建'));
+        $('#btn-acquire').disabled = true;
+        return null;
+      }
+      all.forEach((s) => sel.append(h('option', { value: String(s.sessionId || s.id) },
+        `#${s.id} ${s.name}（${s.status}）— ${s.scriptTitle}`)));
+      return all;
+    }
+
+    function selectSession(id) {
+      sessionId = Number(id);
+      history.replaceState(null, '', `?session=${sessionId}`);
+      $('#audience-link').href = `/audience.html?session=${sessionId}`;
+      snap = null;
+      token = localStorage.getItem(tokenKey(sessionId));
+      stopHeartbeat();
+      socket.subscribe('session', { sessionId });
+      if (token) {
+        socket.call('setToken', { token }).catch(() => {});
+        // 重开页面时尝试用记忆的令牌静默续期；过期则自动失效，再点“取得控制权”即可接管
+        setTimeout(() => acquire(true), 150);
+      }
+    }
+
+    $('#session-select').addEventListener('change', (e) => {
+      if (e.target.value) selectSession(e.target.value);
+    });
+
+    (async function init() {
+      $('#op-name').value = localStorage.getItem('tp_op_name') || '';
+      $('#op-name').addEventListener('change', () => localStorage.setItem('tp_op_name', $('#op-name').value.trim()));
+
+      await loadSessionList();
+      const params = new URLSearchParams(location.search);
+      const wanted = Number(params.get('session')) || Number($('#session-select').value);
+      if (wanted) {
+        $('#session-select').value = String(wanted);
+        selectSession(wanted);
+      } else if ($('#session-select').value) {
+        selectSession($('#session-select').value);
+      }
+      setInterval(updateControlPanel, 500);
+    })();
+  })();
+  </script>
+</body>
+</html>
